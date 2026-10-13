@@ -33,7 +33,10 @@ NEAR, FAR = 1.5, 4.525       # experiment/re10k.yaml, before the x200
 TARGET_DEPTH = 650.0         # median DTU object distance, in model units
 
 
-def load_encoder(checkpoint="checkpoints/checkpoint.ckpt", device="cuda"):
+def load_encoder(checkpoint="checkpoints/checkpoint.ckpt", device="cuda", dinov2=True):
+    """dinov2=False switches depth to the multi-view cost-volume branch. Its
+    weights are in the checkpoint; the config flag model.encoder.use_dinov2 is
+    never passed to the depth predictor, so it is flipped on the module."""
     from hydra import compose, initialize_config_dir
 
     with initialize_config_dir(config_dir=str(REPO / "config"), version_base=None):
@@ -48,6 +51,7 @@ def load_encoder(checkpoint="checkpoints/checkpoint.ckpt", device="cuda"):
         train_cfg=cfg.train, encoder=encoder, encoder_visualizer=visualizer,
         decoder=decoder, losses=[], step_tracker=None)
     wrapper.eval().to(device)
+    wrapper.encoder.depth_predictor.use_dinov2 = dinov2
     return wrapper.encoder
 
 

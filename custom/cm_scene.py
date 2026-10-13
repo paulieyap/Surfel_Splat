@@ -75,6 +75,8 @@ def main():
                     help="optional stereo/MVS depth PNGs (mm) to score the depth maps against")
     ap.add_argument("--band", nargs=2, type=float, default=[0.15, 0.7])
     ap.add_argument("--cm-code", default="/workspace/data/ovais_code")
+    ap.add_argument("--no-dinov2", action="store_true",
+                    help="use the multi-view cost-volume depth branch instead of the DINOv2 head")
     args = ap.parse_args()
 
     sys.path.insert(0, args.cm_code)
@@ -105,7 +107,7 @@ def main():
         anchor = np.asarray(o3d.io.read_point_cloud(str(args.anchor_cloud)).points)
         print(f"anchor cloud {len(anchor)} pts", flush=True)
 
-    enc = load_encoder()
+    enc = load_encoder(dinov2=not args.no_dinov2)
     h, w = IMAGE_HW
     tw = int(round(min(K["fx"] / 2.18, W)))
     th = int(round(tw * h / w))

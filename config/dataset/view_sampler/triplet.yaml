@@ -2,5 +2,5 @@ name: triplet
 
 num_context_views: 3
 num_target_views: 2
-min_gap: 1
-max_gap: 4
+min_gap: 2
+max_gap: 8

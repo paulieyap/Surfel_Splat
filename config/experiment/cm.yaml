@@ -1,0 +1,72 @@
+# @package _global_
+
+# Crop-monitor pilot: train the multi-view cost-volume depth branch on ZED
+# sessions (COLMAP poses, FFS stereo depth as labels). Data from
+# custom/train/make_chunks.py; units are metres * 10/3, so near/far 0.5..4.5
+# cover 0.15..1.35 m.
+
+defaults:
+  - override /dataset: re10k
+  - override /dataset/view_sampler: triplet
+  - override /model/encoder: costvolume
+  - override /loss: [geo, mse]
+
+wandb:
+  name: cm
+  tags: [cm, 256x320]
+
+data_loader:
+  train:
+    batch_size: 1
+    num_workers: 4
+  val:
+    num_workers: 1
+
+trainer:
+  max_steps: 5000
+  val_check_interval: 500
+  num_sanity_val_steps: 1
+
+checkpointing:
+  every_n_train_steps: 1000
+  save_top_k: 2
+  resume: false
+
+train:
+  print_log_every_n_steps: 25
+
+optimizer:
+  warm_up_steps: 250
+
+model:
+  encoder:
+    use_dinov2: false
+    windowed_attention: true
+    depth_scale_200: false
+    num_depth_candidates: 128
+    costvolume_unet_feat_dim: 192
+    costvolume_unet_channel_mult: [1,2,2]
+    costvolume_unet_attn_res: [4,8]
+    gaussians_per_pixel: 1
+    depth_unet_feat_dim: 64
+    depth_unet_attn_res: [8,16]
+    depth_unet_channel_mult: [1,1,2,2,2]
+
+loss:
+  lpips:
+    apply_after_step: 0
+    weight: 0.05
+
+dataset:
+  image_shape: [256, 320]
+  roots: [/workspace/data/train_cm/chunks]
+  near: 0.5
+  far: 4.5
+  make_baseline_1: false
+  baseline_scale_bounds: false
+  augment: false            # the reflect shim mirrors images but not depth labels
+  pose_scale_200: false
+
+test:
+  eval_time_skip_steps: 5
+  compute_scores: true

@@ -37,6 +37,8 @@ class DatasetRE10kCfg(DatasetCfgCommon):
     far: float = -1.0
     baseline_scale_bounds: bool = True
     shuffle_val: bool = True
+    pose_scale_200: bool = True   # released DTU inference scales translations x200; False keeps
+                                  # stored units (training, and the cost-volume branch at inference)
 
 
 class DatasetRE10k(IterableDataset):
@@ -273,7 +275,8 @@ class DatasetRE10k(IterableDataset):
         w2c = repeat(torch.eye(4, dtype=torch.float32), "h w -> b h w", b=b).clone()
         w2c[:, :3] = rearrange(poses[:, 6:], "b (h w) -> b h w", h=3, w=4)
         
-        w2c[:,:3,-1] *= 200      # Remember to comment out this line when training
+        if self.cfg.pose_scale_200:
+            w2c[:, :3, -1] *= 200
 
         return w2c.inverse(), intrinsics
 

@@ -59,6 +59,13 @@ class EncoderCostVolumeCfg:
     wo_backbone_cross_attn: bool
     wo_cost_volume_refine: bool
     use_epipolar_trans: bool
+    use_dinov2: bool = True               # False: depth from the multi-view cost volume
+    dinov2_model_name: str = "dinov2_vitl14"
+    freeze_dinov2: bool = True
+    depth_scale_200: bool = True          # released inference scales depth x200; False keeps
+                                          # depth in the training units (pairs with dataset.pose_scale_200)
+    windowed_attention: bool = False      # loop the 5x5 surfel attention instead of F.unfold
+                                          # (same result, a fraction of the memory; needed to train on 32 GB)
 
 class SurfelAdaption(nn.Module):
     """Computes adaptive attention window size for each pixel."""
@@ -138,8 +145,9 @@ class SurfelAdaption(nn.Module):
 
 class FeatureAggregation(nn.Module):
     """Feature refinement using dynamic windows."""
-    def __init__(self, feature_dim, normal_dim, output_dim, hidden_dim=None):
+    def __init__(self, feature_dim, normal_dim, output_dim, hidden_dim=None, windowed=False):
         super().__init__()
+        self.windowed = windowed
         self.feature_dim = feature_dim
         self.output_dim = output_dim
         self.hidden_dim = hidden_dim if hidden_dim is not None else feature_dim
@@ -190,9 +198,29 @@ class FeatureAggregation(nn.Module):
             ),
             nn.GELU(),
         )
+    def _windowed_attention(self, q, k, v, window_sizes, max_ws=5):
+        """Same result as the F.unfold path below (zero padding, row-major window
+        offsets, dynamic window mask, softmax over the window), but loops over the
+        max_ws^2 offsets so it never materialises [B, C, max_ws^2, H, W]."""
+        b, _, h, w = q.shape
+        p = max_ws // 2
+        kp, vp = F.pad(k, (p, p, p, p)), F.pad(v, (p, p, p, p))
+        offs = [(dy, dx) for dy in range(max_ws) for dx in range(max_ws)]
+        scores = torch.stack([(q * kp[:, :, dy:dy + h, dx:dx + w]).sum(1) for dy, dx in offs], 1) * self.scale
+        mask = self._create_window_mask(window_sizes, max_ws, h, w, b, q.device)[:, 0]   # [B, max_ws^2, H, W]
+        attn = torch.softmax(scores.masked_fill(~mask, float("-inf")), dim=1)
+        out = 0
+        for i, (dy, dx) in enumerate(offs):
+            out = out + attn[:, i:i + 1] * vp[:, :, dy:dy + h, dx:dx + w]
+        return out
+
     def _local_attention_for_normal_dynamic(self, x, window_sizes):
         """Apply dynamic window local self-attention to normal features (memory-efficient version)."""
         x_norm = self.norm1(x.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
+        if self.windowed:
+            out = self._windowed_attention(self.normal_query_proj(x_norm), self.normal_key_proj(x_norm),
+                                           self.normal_value_proj(x_norm), window_sizes)
+            return self.normal_output_proj(out) + x
 
         batch_size, _, height, width = x.shape
 
@@ -267,6 +295,11 @@ class FeatureAggregation(nn.Module):
         """Localized cross attention with dynamic window sizes - memory optimized."""
         img_feats_norm = self.norm2(img_feats.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
         normal_feats_norm = self.norm2(refined_normal_feats.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
+        if self.windowed:
+            out = self._windowed_attention(self.img_proj(img_feats_norm),
+                                           self.refined_normal_k_proj(normal_feats_norm),
+                                           self.refined_normal_v_proj(normal_feats_norm), window_sizes)
+            return self.cross_output_proj(out) + img_feats
 
         batch_size, feat_dim, height, width = img_feats.shape
 
@@ -449,6 +482,9 @@ class EncoderCostVolume(Encoder[EncoderCostVolumeCfg]):
             wo_depth_refine=cfg.wo_depth_refine,
             wo_cost_volume=cfg.wo_cost_volume,
             wo_cost_volume_refine=cfg.wo_cost_volume_refine,
+            use_dinov2=cfg.use_dinov2,
+            dinov2_model_name=cfg.dinov2_model_name,
+            freeze_dinov2=cfg.freeze_dinov2,
         )
         self.gaussian_head = self.depth_predictor.to_gaussian
         feat_dim = self.depth_predictor.gau_in_channel
@@ -459,7 +495,8 @@ class EncoderCostVolume(Encoder[EncoderCostVolumeCfg]):
             feature_dim=feat_dim,
             normal_dim=128,
             output_dim=feat_dim,
-            hidden_dim=feat_dim
+            hidden_dim=feat_dim,
+            windowed=cfg.windowed_attention,
         )
 
     def map_pdf_to_opacity(
@@ -526,7 +563,8 @@ class EncoderCostVolume(Encoder[EncoderCostVolumeCfg]):
             cnn_features=cnn_features,
         )
 
-        depths = 200 * depths  # Remember to comment out this line when training
+        if self.cfg.depth_scale_200:
+            depths = 200 * depths  # released inference units; training keeps depth in near/far units
 
         # Compute dynamic window sizes
         window_sizes = self.surfel_adaption(depths, context["intrinsics"], h, w)  # [B*V, H, W]

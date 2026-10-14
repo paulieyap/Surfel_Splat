@@ -33,15 +33,15 @@ NEAR, FAR = 1.5, 4.525       # experiment/re10k.yaml, before the x200
 TARGET_DEPTH = 650.0         # median DTU object distance, in model units
 
 
-def load_encoder(checkpoint="checkpoints/checkpoint.ckpt", device="cuda", dinov2=True):
-    """dinov2=False switches depth to the multi-view cost-volume branch. Its
-    weights are in the checkpoint; the config flag model.encoder.use_dinov2 is
-    never passed to the depth predictor, so it is flipped on the module."""
+def load_encoder(checkpoint="checkpoints/checkpoint.ckpt", device="cuda", dinov2=True, experiment="re10k"):
+    """dinov2=False switches the released model's depth to the (untrained)
+    cost-volume branch by flipping the module flag. experiment="cm" loads a
+    crop-monitor pilot checkpoint (cost volume, depth in training units)."""
     from hydra import compose, initialize_config_dir
 
     with initialize_config_dir(config_dir=str(REPO / "config"), version_base=None):
         cfg_dict = compose(config_name="main", overrides=[
-            "+experiment=re10k", f"checkpointing.load={checkpoint}"])
+            f"+experiment={experiment}", f"checkpointing.load={checkpoint}"])
     cfg = load_typed_root_config(cfg_dict)
     set_cfg(cfg_dict)
     encoder, visualizer = get_encoder(cfg.model.encoder)
@@ -51,12 +51,13 @@ def load_encoder(checkpoint="checkpoints/checkpoint.ckpt", device="cuda", dinov2
         train_cfg=cfg.train, encoder=encoder, encoder_visualizer=visualizer,
         decoder=decoder, losses=[], step_tracker=None)
     wrapper.eval().to(device)
-    wrapper.encoder.depth_predictor.use_dinov2 = dinov2
+    if experiment == "re10k":
+        wrapper.encoder.depth_predictor.use_dinov2 = dinov2
     return wrapper.encoder
 
 
 @torch.no_grad()
-def run_views(encoder, images, intrinsics, c2w_units, device="cuda"):
+def run_views(encoder, images, intrinsics, c2w_units, device="cuda", near=NEAR, far=FAR):
     """images: list of HxWx3 uint8 RGB at IMAGE_HW; intrinsics: list of 3x3
     normalised by the crop size; c2w_units: list of 4x4 OpenCV camera->world
     in model units (DTU-like mm). Returns (points [V,H,W,3] in model units,
@@ -67,8 +68,8 @@ def run_views(encoder, images, intrinsics, c2w_units, device="cuda"):
         "image": img[None].to(device),
         "intrinsics": torch.from_numpy(np.stack(intrinsics)).float()[None].to(device),
         "extrinsics": torch.from_numpy(np.stack(c2w_units)).float()[None].to(device),
-        "near": torch.full((1, v), NEAR, device=device),
-        "far": torch.full((1, v), FAR, device=device),
+        "near": torch.full((1, v), near, device=device),
+        "far": torch.full((1, v), far, device=device),
     }
     torch.cuda.synchronize()
     t0 = time.time()
